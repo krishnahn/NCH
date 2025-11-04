@@ -5,18 +5,7 @@ import os
 
 def initialize_system():
     print("\n🔄 Initializing the system...")
-    
-    # Path to your local model
-    local_model_path = r"C:\Users\hamsa\OneDrive\Desktop\my proj\Nursing chatbot\rag1\rag1\sarvam-1"
-    
-    # Check if local model exists
-    if not os.path.exists(local_model_path):
-        print(f"❌ ERROR: Local model not found at: {local_model_path}")
-        print("Please make sure the model is downloaded to this location.")
-        return None
-    
-    # Load documents
-    docs = load_all_documents(r"C:\Users\hamsa\OneDrive\Desktop\my proj\Nursing chatbot\rag1\rag1\pdf")
+    docs = load_all_documents(r"C:\Users\STIC-11\Desktop\Nchat\rag1\pdf")
     store = FaissVectorStore("faiss_store")
     
     # Check if index exists, if not build it
@@ -27,8 +16,7 @@ def initialize_system():
         print("📂 Loading existing vector store...")
         store.load()
     
-    # Initialize RAG search with local model
-    rag_search = RAGSearch(local_model_path=local_model_path)
+    rag_search = RAGSearch()
     print("\n✅ System initialized and ready!")
     return rag_search
 
@@ -40,12 +28,7 @@ def print_welcome():
     print("=" * 60)
     print("🏥 Welcome to the Nursing Information Assistant 🏥")
     print("=" * 60)
-    print("\nI can help you with information about nursing colleges in Tamil Nadu.")
-    print("\n📋 Supported Languages:")
-    print("   - English")
-    print("   - தமிழ் (Tamil)")
-    print("   - हिंदी (Hindi)")
-    print("   - മലയാളം (Malayalam)")
+    print("\nI can help you with information about nursing colleges and related topics.")
     print("\nType 'quit' or 'exit' to end the conversation.")
     print("Type 'clear' to clear the screen.")
     print("-" * 60)
@@ -53,10 +36,6 @@ def print_welcome():
 def main():
     print_welcome()
     rag_search = initialize_system()
-    
-    if rag_search is None:
-        print("\n❌ Failed to initialize the system. Exiting...")
-        return
     
     while True:
         try:

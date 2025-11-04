@@ -1,25 +1,15 @@
 from typing import List, Any
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 from sentence_transformers import SentenceTransformer
 import numpy as np
-import torch
 from src.data_loader import load_all_documents
 
 class EmbeddingPipeline:
-    def __init__(self, model_name: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2", chunk_size: int = 800, chunk_overlap: int = 300):
+    def __init__(self, model_name: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2", chunk_size: int = 1000, chunk_overlap: int = 200):
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
-        # Select device dynamically; fall back to CPU if CUDA isn't available or model load fails
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        try:
-            self.model = SentenceTransformer(model_name, device=device)
-            print(f"[INFO] Loaded embedding model: {model_name} on device {device}")
-        except Exception as e:
-            # Fallback to CPU if any issue (for example, torch not compiled with CUDA)
-            if device != "cpu":
-                print(f"[WARN] Failed to load model on device '{device}': {e}. Falling back to 'cpu'.")
-            self.model = SentenceTransformer(model_name, device="cpu")
-            print(f"[INFO] Loaded embedding model: {model_name} on device cpu")
+        self.model = SentenceTransformer(model_name)
+        print(f"[INFO] Loaded embedding model: {model_name}")
 
     def chunk_documents(self, documents: List[Any]) -> List[Any]:
         splitter = RecursiveCharacterTextSplitter(
@@ -40,7 +30,7 @@ class EmbeddingPipeline:
         return embeddings
 
 # Example usage
-if __name__ == "__main__":           
+if __name__ == "__main__":
     
     docs = load_all_documents("data")
     emb_pipe = EmbeddingPipeline()
