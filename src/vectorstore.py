@@ -1,25 +1,29 @@
 import os
-import faiss
 import numpy as np
-import faiss
 import pickle
 from typing import List, Any
+from uuid import uuid4
+import chromadb
+from chromadb.config import Settings
 import torch
 from sentence_transformers import SentenceTransformer
 from src.embedding import EmbeddingPipeline
 
-class FaissVectorStore:
+class ChromaVectorStore:
     def __init__(self, persist_dir: str = "faiss_store", 
                  embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2", 
                  chunk_size: int = 800, 
                  chunk_overlap: int = 150):
         self.persist_dir = persist_dir
         os.makedirs(self.persist_dir, exist_ok=True)
-        self.index = None
-        if torch.cuda.is_available():
-            res = faiss.StandardGpuResources()
-            self.index = faiss.index_cpu_to_gpu(res, 0, self.index)
-            print("[INFO] FAISS index moved to GPU")
+        # Initialize Chroma client (try local duckdb+parquet persistence)
+        try:
+            self.client = chromadb.Client(Settings(chroma_db_impl="duckdb+parquet", persist_directory=self.persist_dir))
+        except Exception:
+            self.client = chromadb.Client()
+
+        # Use a default collection name for backward compatibility
+        self.collection = self.client.get_or_create_collection(name="default")
         self.metadata = []
         self.embedding_model = embedding_model
         # Choose device dynamically and fall back to CPU on failure
@@ -58,8 +62,8 @@ class FaissVectorStore:
         self.save()
         print(f"[INFO] Vector store built with {len(chunks)} chunks and saved to {self.persist_dir}")
 
-    def add_embeddings(self, embeddings: np.ndarray, metadatas: List[Any] = None):
-        # Defensive handling: ensure numpy array, handle empty and 1-D inputs
+    def add_embeddings(self, embeddings, metadatas: List[Any] = None, documents: List[str] = None):
+        # Accept numpy arrays or lists
         embeddings = np.asarray(embeddings, dtype="float32")
 
         if embeddings.size == 0:
@@ -72,55 +76,92 @@ class FaissVectorStore:
         if embeddings.ndim != 2:
             raise ValueError(f"Unexpected embeddings array shape: {embeddings.shape}")
 
-        # Normalize embeddings safely (avoid divide-by-zero)
-        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-        norms[norms == 0] = 1.0
-        embeddings_normalized = embeddings / norms
+        # Convert embeddings to nested lists for Chroma
+        embeddings_list = embeddings.tolist()
 
-        dim = embeddings_normalized.shape[1]
-        if self.index is None:
-            self.index = faiss.IndexFlatIP(dim)
+        n = len(embeddings_list)
+        ids = [uuid4().hex for _ in range(n)]
 
-        self.index.add(embeddings_normalized)
+        # Prepare documents list if not provided
+        if documents is None and metadatas is not None:
+            documents = [m.get("text", "") for m in metadatas]
+
+        # Chroma expects lists for ids/documents/metadatas/embeddings
+        add_kwargs = {
+            "ids": ids,
+            "embeddings": embeddings_list,
+        }
+        if documents is not None:
+            add_kwargs["documents"] = documents
+        if metadatas is not None:
+            add_kwargs["metadatas"] = metadatas
+
+        self.collection.add(**add_kwargs)
+        # Persist to disk
+        try:
+            self.client.persist()
+        except Exception:
+            # Some chroma clients persist automatically; ignore failures
+            pass
+
+        # Maintain a local metadata list for compatibility with previous API
         if metadatas:
             if isinstance(metadatas, dict):
                 self.metadata.append(metadatas)
             else:
                 self.metadata.extend(metadatas)
-        print(f"[INFO] Added {embeddings_normalized.shape[0]} normalized vectors to Faiss index.")
+
+        print(f"[INFO] Added {n} vectors to Chroma collection 'default'.")
 
     def save(self):
-        faiss_path = os.path.join(self.persist_dir, "faiss.index")
-        meta_path = os.path.join(self.persist_dir, "metadata.pkl")
-        faiss.write_index(self.index, faiss_path)
-        with open(meta_path, "wb") as f:
-            pickle.dump(self.metadata, f)
-        print(f"[INFO] Saved Faiss index and metadata to {self.persist_dir}")
+        # Persist chroma client/collection
+        try:
+            self.client.persist()
+            # also save metadata for compatibility
+            meta_path = os.path.join(self.persist_dir, "metadata.pkl")
+            with open(meta_path, "wb") as f:
+                pickle.dump(self.metadata, f)
+            print(f"[INFO] Persisted Chroma collection and metadata to {self.persist_dir}")
+        except Exception as e:
+            print(f"[WARN] Chroma persist failed: {e}")
 
     def load(self):
-        faiss_path = os.path.join(self.persist_dir, "faiss.index")
-        meta_path = os.path.join(self.persist_dir, "metadata.pkl")
-        self.index = faiss.read_index(faiss_path)
-        with open(meta_path, "rb") as f:
-            self.metadata = pickle.load(f)
-        print(f"[INFO] Loaded Faiss index with {self.index.ntotal} vectors from {self.persist_dir}")
+        # Re-initialize client and collection from the persist directory
+        try:
+            self.client = chromadb.Client(Settings(chroma_db_impl="duckdb+parquet", persist_directory=self.persist_dir))
+            self.collection = self.client.get_or_create_collection(name="default")
+            meta_path = os.path.join(self.persist_dir, "metadata.pkl")
+            if os.path.exists(meta_path):
+                with open(meta_path, "rb") as f:
+                    self.metadata = pickle.load(f)
+            print(f"[INFO] Loaded Chroma collection from {self.persist_dir}")
+        except Exception as e:
+            print(f"[WARN] Failed to load Chroma collection from {self.persist_dir}: {e}")
 
     def search(self, query_embedding: np.ndarray, top_k: int = 5):
-        query_normalized = query_embedding / np.linalg.norm(query_embedding, axis=1, keepdims=True)
-        
-        D, I = self.index.search(query_normalized, min(top_k, self.index.ntotal))
+        # Accept numpy array or list
+        emb = np.asarray(query_embedding, dtype="float32")
+        if emb.ndim == 1:
+            emb = emb.reshape(1, -1)
+
+        emb_list = emb.tolist()
+        try:
+            # Avoid requesting 'ids' in include (not accepted by this chroma version)
+            res = self.collection.query(query_embeddings=emb_list, n_results=top_k, include=["metadatas", "distances", "documents"])
+        except Exception as e:
+            print(f"[ERROR] Chroma query failed: {e}")
+            return []
         results = []
-        for idx, score in zip(I[0], D[0]):
-            if idx < len(self.metadata):
-                meta = self.metadata[idx]
-                results.append({
-                    "index": int(idx), 
-                    "score": float(score),
-                    "metadata": meta
-                })
+        ids = res.get("ids", [[]])[0] if "ids" in res else []
+        dists = res.get("distances", [[]])[0]
+        metadatas = res.get("metadatas", [[]])[0]
+        docs = res.get("documents", [[]])[0]
+
+        for _id, dist, meta, doc in zip(ids, dists, metadatas, docs):
+            results.append({"id": _id, "distance": float(dist), "metadata": meta, "document": doc})
         return results
 
     def query(self, query_text: str, top_k: int = 5):
-        print(f"[INFO] Querying vector store for: '{query_text[:100]}...'")
-        query_emb = self.model.encode([query_text]).astype('float32')
+        print(f"[INFO] Querying Chroma collection for: '{query_text[:100]}...'")
+        query_emb = self.model.encode([query_text])
         return self.search(query_emb, top_k=top_k)

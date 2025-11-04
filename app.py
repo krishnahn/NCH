@@ -1,5 +1,5 @@
 from src.data_loader import load_all_documents
-from src.vectorstore import FaissVectorStore
+from src.vectorstore import ChromaVectorStore
 from src.search import RAGSearch
 import os
 
@@ -11,20 +11,20 @@ def initialize_system():
     
     # Check if local model exists
     if not os.path.exists(local_model_path):
-        print(f"❌ ERROR: Local model not found at: {local_model_path}")
+        print(f" ERROR: Local model not found at: {local_model_path}")
         print("Please make sure the model is downloaded to this location.")
         return None
     
     # Load documents
     docs = load_all_documents(r"C:\Users\hamsa\OneDrive\Desktop\my proj\Nursing chatbot\rag1\rag1\pdf")
-    store = FaissVectorStore("faiss_store")
+    store = ChromaVectorStore("faiss_store")
     
-    # Check if index exists, if not build it
-    if not os.path.exists(os.path.join("faiss_store", "faiss.index")):
-        print("📦 Building new vector store...")
+    # Check if persisted metadata exists; build if missing
+    if not os.path.exists(os.path.join("faiss_store", "metadata.pkl")):
+        print(" Building new vector store (Chroma)...")
         store.build_from_documents(docs)
     else:
-        print("📂 Loading existing vector store...")
+        print(" Loading existing vector store (Chroma)...")
         store.load()
     
     # Initialize RAG search with local model
