@@ -1,131 +1,79 @@
 import os
-import torch
 from dotenv import load_dotenv
-from src.vectorstore import ChromaVectorStore
-from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
-from sentence_transformers import SentenceTransformer
-from langchain_community.llms import HuggingFacePipeline
-from deep_translator import GoogleTranslator
-from langdetect import detect
-import warnings
-import logging
-from pathlib import Path
-
-warnings.filterwarnings("ignore", category=UserWarning)
-warnings.filterwarnings("ignore", message=".*deprecated.*")
-logging.getLogger("transformers").setLevel(logging.ERROR)
+from src.vectorstore import FaissVectorStore
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 load_dotenv()
 
 class RAGSearch:
-    def __init__(self, persist_dir: str = "chroma_store", 
-                 embedding_model: str = "BAAI/bge-m3"):
-        # Initialize vectorstore (Chroma)
-        self.vectorstore = ChromaVectorStore(persist_dir, embedding_model)
+    def __init__(
+        self,
+        persist_dir: str = "faiss_store",
+        embedding_model: str = "paraphrase-multilingual-MiniLM-L12-v2",
+        llm_model: str = "gemini-1.5-flash"
+    ):
+        # --- Load FAISS VectorStore ---
+        self.vectorstore = FaissVectorStore(persist_dir, embedding_model)
+        faiss_path = os.path.join(persist_dir, "faiss.index")
+        meta_path = os.path.join(persist_dir, "metadata.pkl")
 
-        # Load or build vectorstore
-        has_store = os.path.isdir(persist_dir) and any(os.scandir(persist_dir))
-        if not has_store:
-            from data_loader import load_all_documents
+        # --- Build or Load FAISS index ---
+        if not (os.path.exists(faiss_path) and os.path.exists(meta_path)):
+            from src.data_loader import load_all_documents
             docs = load_all_documents("data")
             self.vectorstore.build_from_documents(docs)
         else:
             self.vectorstore.load()
 
-        # Initialize Sarvam-1 model from local directory
-        print("🔹 Loading Sarvam-1 model from local directory...")
-        model_path = r"D:\NCH\SNCH\Nchatbot\sarvam-1"
-        
-        tokenizer = AutoTokenizer.from_pretrained(model_path)
-        model = AutoModelForCausalLM.from_pretrained(
-            model_path,
-            torch_dtype=torch.float16,
-            device_map="auto",
-            local_files_only=True
+        # --- Configure Gemini ---
+        api_key = os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            raise RuntimeError("GOOGLE_API_KEY is not set in environment variables.")
+
+        self.llm = ChatGoogleGenerativeAI(
+            model=llm_model,
+            temperature=0.3,
+            top_p=0.9,
+            max_output_tokens=1024,
         )
-
-        # Create generation pipeline
-        gen_pipeline = pipeline(
-            "text-generation",
-            model=model,
-            tokenizer=tokenizer,
-            max_new_tokens=150,
-            do_sample=False,
-            top_p=0.80,
-            temperature=0.1,
-            eos_token_id=tokenizer.eos_token_id,
-        )
-        self.llm = HuggingFacePipeline(pipeline=gen_pipeline)
-        print("✅ Sarvam-1 model loaded successfully from local directory!")
-
-        # Load system prompt once; keep in memory for reuse
-        self.system_prompt = self._load_system_prompt()
-
-    def detect_language(self, text: str) -> str:
-        try:
-            return detect(text)
-        except:
-            return 'en'
-
-    def _load_system_prompt(self, path: str = None) -> str:
-        """Load nursing system prompt from file. Returns a default fallback if not available."""
-        if path is None:
-            # relative to project src directory
-            path = Path(__file__).parent / "nursing_system_prompt.txt"
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                return f.read().strip()
-        except Exception:
-            # Minimal fallback system prompt
-            return (
-                """
-You are a Nursing Information Assistant. Use the provided context to answer administrative and educational
-questions about nursing programs. Do not give medical advice. If the answer is not in the context, say you
-don't know and suggest looking at official regulatory sources or asking for a broader search. Answer in user's language.
-"""
-            )
-
-    def translate_if_needed(self, text: str, target_lang: str = 'en') -> str:
-        source_lang = self.detect_language(text)
-        if source_lang != target_lang:
-            try:
-                translator = GoogleTranslator(source=source_lang, target=target_lang)
-                return translator.translate(text)
-            except:
-                return text
-        return text
+        print(f"[INFO] Gemini LLM initialized: {llm_model}")
 
     def search_and_summarize(self, query: str, top_k: int = 5) -> str:
-        # Translate query to English if it's in another language
-        query_en = self.translate_if_needed(query)
-        
-        # Search for relevant documents
-        results = self.vectorstore.query(query_en, top_k=top_k)
-        texts = [r["metadata"].get("text", "") for r in results if r["metadata"]]
+        """Retrieve relevant chunks, build a context prompt, and summarize using Gemini."""
+        results = self.vectorstore.query(query, top_k=top_k)
+        texts = [r["metadata"].get("text", "") for r in results if r.get("metadata")]
         context = "\n\n".join(texts)
-        
-        if not context:
-            return "No relevant documents found."
-            
-        # Create prompt for the model. Prepend the nursing system prompt as an instruction block.
-        sys_prompt = (self.system_prompt + "\n\n") if getattr(self, "system_prompt", None) else ""
-        prompt = (
-            f"{sys_prompt}Based on the following context, answer the query: '{query}'\n\nContext:\n{context}\n\nAnswer:"
-        )
-        
-        # Get response from Sarvam-2B
-        response = self.llm.invoke(prompt)
-        
-        # Translate response back to query language if needed
-        query_lang = self.detect_language(query)
-        if query_lang != 'en':
-            response = self.translate_if_needed(response, query_lang)
-            
-        return response
 
-# Example usage
+        if not context.strip():
+            return "No relevant documents found."
+
+        prompt = f"""
+You are a professional assistant specialized in nursing and healthcare education.
+Answer the following question based strictly on the provided context.
+
+Question:
+{query}
+
+Context:
+{context}
+
+Instructions:
+- Provide a concise, factual summary.
+- If answer not found, say 'I don’t know based on the provided context.'
+- Cite relevant sections or documents if possible.
+
+Answer:
+"""
+        try:
+            response = self.llm.invoke(prompt)
+            return response.content.strip()
+        except Exception as e:
+            return f"[ERROR] Gemini API call failed: {e}"
+
+
+# --- Example Usage ---
 if __name__ == "__main__":
     rag_search = RAGSearch()
-    query = "What is attention mechanism?"
+    query = "What are the eligibility criteria for B.Sc. Nursing?"
     summary = rag_search.search_and_summarize(query, top_k=3)
-    print("Summary:", summary)
+    print("\nSummary:\n", summary)

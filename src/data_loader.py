@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-RAG bootstrapper: load (PDF/TXT/CSV/XLSX/DOCX/JSON/JSONL) -> chunk -> embed -> ChromaDB
+RAG bootstrapper: load (PDF/TXT/CSV/XLSX/DOCX/JSON/JSONL) -> chunk -> embed -> FAISS
 - JSON auto-handling for: [{"page": "...", "content": "..."}]
 - Attaches 'source_url' metadata from 'page'
-- Saves to ./chroma_store and reloads
+- Saves to ./faiss_store and reloads
 - Simple CLI for ad-hoc retrieval tests
 """
 
@@ -23,7 +23,7 @@ from langchain_community.document_loaders import (
 )
 from langchain_community.document_loaders.excel import UnstructuredExcelLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import Chroma
+from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 from langchain_community.embeddings import HuggingFaceEmbeddings
 
@@ -214,8 +214,8 @@ def load_all_documents(data_dir: str) -> List[Document]:
 
 # ---------------- Chunking ----------------
 def chunk_documents(documents: List[Document],
-                    chunk_size: int = 600,
-                    chunk_overlap: int = 80) -> List[Document]:
+                    chunk_size: int = 1000,
+                    chunk_overlap: int = 150) -> List[Document]:
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
@@ -224,31 +224,27 @@ def chunk_documents(documents: List[Document],
     return splitter.split_documents(documents)
 
 # ---------------- Embeddings ----------------
-def get_embeddings(model_name: str = "BAAI/bge-m3") -> HuggingFaceEmbeddings:
+def get_embeddings(model_name: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"):
     _info(f"Loaded embedding model: {model_name}")
     return HuggingFaceEmbeddings(model_name=model_name)
 
 # ---------------- Vector store helpers ----------------
-def build_and_save_chroma(docs: List[Document],
-                          embeddings,
-                          chroma_dir: str = "chroma_store") -> Chroma:
-    _info(f"Building Chroma store from {len(docs)} raw documents...")
-    vectordb = Chroma.from_documents(
-        documents=docs,
-        embedding_function=embeddings,
-        persist_directory=chroma_dir,
-    )
-    vectordb.persist()
-    _info(f"Chroma store built and persisted to {chroma_dir}")
+def build_and_save_faiss(docs: List[Document],
+                         embeddings,
+                         faiss_dir: str = "faiss_store") -> FAISS:
+    _info(f"Building vector store from {len(docs)} raw documents...")
+    vectordb = FAISS.from_documents(docs, embeddings)
+    vectordb.save_local(faiss_dir)
+    _info(f"Vector store built and saved to {faiss_dir}")
     return vectordb
 
-def load_chroma(chroma_dir: str = "chroma_store",
-                embeddings=None) -> Chroma:
-    _info("Loaded Chroma store from " + chroma_dir)
-    return Chroma(persist_directory=chroma_dir, embedding_function=embeddings)
+def load_faiss(faiss_dir: str = "faiss_store",
+               embeddings=None) -> FAISS:
+    _info("Loaded FAISS index and metadata from " + faiss_dir)
+    return FAISS.load_local(faiss_dir, embeddings, allow_dangerous_deserialization=True)
 
 # ---------------- Simple CLI for testing ----------------
-def interactive_cli(vdb, k: int = 5):
+def interactive_cli(vdb: FAISS, k: int = 5):
     print("\nYou can now query the vector store. Type your question below.")
     while True:
         try:
@@ -272,7 +268,7 @@ def interactive_cli(vdb, k: int = 5):
         for i, h in enumerate(hits, 1):
             src_path = h.metadata.get("source")
             src_url = h.metadata.get("source_url")
-            print(f"\n[{i}] score≈cos not shown")
+            print(f"\n[{i}] score≈cos not shown (FAISS-only)")
             if src_url:
                 print(f"    Source URL : {src_url}")
             if src_path:
@@ -286,25 +282,26 @@ if __name__ == "__main__":
     print("🔄 Initializing the system...")
 
     # Point to your BASE folder (not just pdf/)
-    base_path = r"D:\NCH\SNCH\Nchatbot"
+    # Example: r"C:\Users\STIC-11\Desktop\Nchat\rag1"
+    base_path = r"D:\NCH - gemini\Nchatbot"
 
     # 1) Load
     raw_docs = load_all_documents(base_path)
 
     # 2) Chunk
     _info(f"Split {len(raw_docs)} documents into chunks.")
-    chunks = chunk_documents(raw_docs, chunk_size=600, chunk_overlap=50)
+    chunks = chunk_documents(raw_docs, chunk_size=1000, chunk_overlap=150)
     _info(f"Chunks created: {len(chunks)}")
 
     # 3) Embeddings
-    embed_model_name = "BAAI/bge-m3"
+    embed_model_name = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     embeddings = get_embeddings(embed_model_name)
 
-    # 4) Build / Save Chroma
-    vectordb = build_and_save_chroma(chunks, embeddings, chroma_dir="chroma_store")
+    # 4) Build / Save FAISS
+    vectordb = build_and_save_faiss(chunks, embeddings, faiss_dir="faiss_store")
 
-    # 5) Reload Chroma (demonstrate load path)
-    vectordb = load_chroma("chroma_store", embeddings=embeddings)
+    # 5) Reload FAISS (demonstrate load path)
+    vectordb = load_faiss("faiss_store", embeddings=embeddings)
 
     # 6) (Optional) Show a couple of examples after load
     shown = 0
@@ -320,8 +317,8 @@ if __name__ == "__main__":
     # 7) Interactive CLI
     try:
         # Simulate model loading banner (if you later integrate a local LLM)
-        print("🔹 Loading Sarvam-1 model from local directory...")
-        print("✅ Sarvam-1 model loaded successfully! (placeholder banner)")
+        print("🔹 Loading Sarvam-2B model...")
+        print("✅ Sarvam-2B model loaded successfully! (placeholder banner)")
     except Exception:
         pass
 
